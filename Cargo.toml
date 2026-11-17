@@ -1,0 +1,21 @@
+[package]
+name = "stellar-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Bounded Stellar transaction parsing and signing-digest verification for policy applications"
+repository = "https://github.com/Ground-Technology/stellar-parser"
+publish = false
+
+[dependencies]
+sha2 = "0.10"
+stellar-xdr = { version = "=27.0.0", features = ["base64"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
