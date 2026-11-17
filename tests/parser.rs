@@ -2,7 +2,9 @@
 
 use std::error::Error as StdError;
 
-use stellar_parser::{Error, MAX_BASE64_BYTES, MAX_XDR_BYTES, parse_base64, parse_xdr, xdr::*};
+use stellar_parser::{
+    Error, MAX_BASE64_BYTES, MAX_XDR_BYTES, MAX_XDR_DEPTH, parse_base64, parse_xdr, xdr::*,
+};
 
 const NETWORK: &str = "Test SDF Network ; September 2015";
 const MAINNET: &str = "Public Global Stellar Network ; September 2015";
@@ -244,10 +246,137 @@ fn preserves_soroban_arguments_credentials_nested_calls_and_other_operations()
 }
 
 #[test]
+fn preserves_protocol_30_muxed_contract_addresses() -> Result<(), Box<dyn StdError>> {
+    let address = ScAddress::MuxedContract(MuxedContract {
+        id: u64::MAX,
+        contract_id: ContractId(Hash([8; 32])),
+    });
+    let call = contract_call(5, "example", vec![ScVal::Address(address.clone())])?;
+    let mut root = invocation(call.clone());
+    root.sub_invocations = vec![invocation(contract_call(
+        6,
+        "child",
+        vec![ScVal::Address(address.clone())],
+    )?)]
+    .try_into()?;
+    let auth = SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
+            address,
+            nonce: -17,
+            signature_expiration_ledger: 123_456,
+            signature: ScVal::Bytes(vec![9; 64].try_into()?),
+        }),
+        root_invocation: root,
+    };
+    let mut envelope = fixture()?;
+    let inner = transaction(&mut envelope)?;
+    inner.tx.ext = TransactionExt::V1(SorobanTransactionData::default());
+    inner.tx.operations = vec![Operation {
+        source_account: None,
+        body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(call.clone()),
+            auth: vec![auth.clone()].try_into()?,
+        }),
+    }]
+    .try_into()?;
+    let expected = inner.tx.clone();
+    let binary = parse_xdr(&encode(&envelope)?, NETWORK)?;
+    let encoded = envelope.to_xdr_base64(Limits::none())?;
+    let base64 = parse_base64(&encoded, NETWORK)?;
+    for parsed in [&binary, &base64] {
+        assert_eq!(parsed.transaction(), &expected);
+        let calls: Vec<_> = parsed.contract_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].invocation, &call);
+        assert_eq!(calls[0].authorizations, std::slice::from_ref(&auth));
+    }
+    assert_eq!(binary.signing_hash(), base64.signing_hash());
+    Ok(())
+}
+
+fn nested_argument_envelope(levels: u32) -> Result<TransactionEnvelope, Box<dyn StdError>> {
+    let mut argument = ScVal::U32(17);
+    for _ in 0..levels {
+        argument = ScVal::Vec(Some(ScVec(vec![argument].try_into()?)));
+    }
+    let mut envelope = fixture()?;
+    let inner = transaction(&mut envelope)?;
+    inner.tx.ext = TransactionExt::V1(SorobanTransactionData::default());
+    inner.tx.operations = vec![Operation {
+        source_account: None,
+        body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(contract_call(
+                5,
+                "example",
+                vec![argument],
+            )?),
+            auth: VecM::default(),
+        }),
+    }]
+    .try_into()?;
+    Ok(envelope)
+}
+
+#[test]
+fn accepts_nested_arguments_that_exceeded_the_previous_depth_limit() -> Result<(), Box<dyn StdError>>
+{
+    for levels in [7, 21] {
+        let mut envelope = nested_argument_envelope(levels)?;
+        let bytes = encode(&envelope)?;
+        assert!(matches!(
+            TransactionEnvelope::from_xdr(
+                &bytes,
+                Limits {
+                    depth: 32,
+                    len: MAX_XDR_BYTES
+                }
+            ),
+            Err(stellar_parser::xdr::Error::DepthLimitExceeded)
+        ));
+        let expected = transaction(&mut envelope)?.tx.clone();
+        let binary = parse_xdr(&bytes, NETWORK)?;
+        assert_eq!(binary.transaction(), &expected);
+        let encoded = envelope.to_xdr_base64(Limits::none())?;
+        let base64 = parse_base64(&encoded, NETWORK)?;
+        assert_eq!(base64.transaction(), &expected);
+        assert_eq!(base64.signing_hash(), binary.signing_hash());
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_arguments_requiring_one_more_than_the_depth_limit() -> Result<(), Box<dyn StdError>> {
+    let envelope = nested_argument_envelope(22)?;
+    let bytes = encode(&envelope)?;
+    assert!(bytes.len() < MAX_XDR_BYTES);
+    TransactionEnvelope::from_xdr(
+        &bytes,
+        Limits {
+            depth: MAX_XDR_DEPTH + 1,
+            len: MAX_XDR_BYTES,
+        },
+    )?;
+    assert!(matches!(
+        parse_xdr(&bytes, NETWORK),
+        Err(Error::InvalidXdr(
+            stellar_parser::xdr::Error::DepthLimitExceeded
+        ))
+    ));
+    let encoded = envelope.to_xdr_base64(Limits::none())?;
+    assert!(matches!(
+        parse_base64(&encoded, NETWORK),
+        Err(Error::InvalidXdr(
+            stellar_parser::xdr::Error::DepthLimitExceeded
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
 fn rejects_excessive_authorization_nesting() -> Result<(), Box<dyn StdError>> {
     let call = contract_call(5, "example", vec![])?;
     let mut root = invocation(call.clone());
-    for _ in 0..40 {
+    for _ in 0..MAX_XDR_DEPTH {
         root = SorobanAuthorizedInvocation {
             function: root.function.clone(),
             sub_invocations: vec![root].try_into()?,
@@ -266,9 +395,19 @@ fn rejects_excessive_authorization_nesting() -> Result<(), Box<dyn StdError>> {
         }),
     }]
     .try_into()?;
+    let bytes = encode(&envelope)?;
     assert!(matches!(
-        parse_xdr(&encode(&envelope)?, NETWORK),
-        Err(Error::InvalidXdr(_))
+        parse_xdr(&bytes, NETWORK),
+        Err(Error::InvalidXdr(
+            stellar_parser::xdr::Error::DepthLimitExceeded
+        ))
+    ));
+    let encoded = envelope.to_xdr_base64(Limits::none())?;
+    assert!(matches!(
+        parse_base64(&encoded, NETWORK),
+        Err(Error::InvalidXdr(
+            stellar_parser::xdr::Error::DepthLimitExceeded
+        ))
     ));
     Ok(())
 }
