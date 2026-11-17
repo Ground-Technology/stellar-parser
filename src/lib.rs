@@ -15,7 +15,7 @@ pub const MAX_XDR_BYTES: usize = 128 * 1024;
 pub const MAX_BASE64_BYTES: usize = MAX_XDR_BYTES.div_ceil(3) * 4;
 
 /// Maximum nesting depth accepted by the XDR decoder.
-pub const MAX_XDR_DEPTH: u32 = 32;
+pub const MAX_XDR_DEPTH: u32 = 100;
 
 fn limits() -> xdr::Limits {
     xdr::Limits {
