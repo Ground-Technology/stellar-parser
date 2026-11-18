@@ -87,9 +87,9 @@ the signature only if:
   `transfer(owner, vault, amount)`.
 
 The tests change one field of a sample transaction at a time and check that the
-policy rejects it. A real TVC application would also authenticate the request
-and fetch it from Turnkey before calling `evaluate`; the example covers only the
-policy.
+policy rejects it. A real TVC application first gets the transaction from
+Turnkey, as described below, and then calls `evaluate`; the example covers only
+the policy.
 
 Run it against the sample transaction:
 
@@ -108,6 +108,43 @@ The arguments are the transaction file, network passphrase, digest to sign,
 owner account, vault contract, token contract, and current Unix time. It prints
 `approved`. The sample transaction is described in
 [`tests/fixtures/README.md`](tests/fixtures/README.md).
+
+## Getting the transaction from Turnkey
+
+Stellar transactions are signed through Turnkey as raw payloads
+(`ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2`), so the signing activity carries only the
+32-byte digest. To let a TVC policy see the transaction, include it in the
+request before stamping it:
+
+```json
+{
+  "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
+  "organizationId": "…",
+  "timestampMs": "…",
+  "parameters": {
+    "signWith": "G… (the transaction's source account)",
+    "payload": "<signing hash, hex>",
+    "encoding": "PAYLOAD_ENCODING_HEXADECIMAL",
+    "hashFunction": "HASH_FUNCTION_NOT_APPLICABLE"
+  },
+  "stellarContext": { "envelopeXdr": "<base64 transaction envelope>" }
+}
+```
+
+`stellarContext` is not a Turnkey signing parameter, but the activity's
+fingerprint is a hash of the whole request, so the transaction cannot be changed
+without changing the activity. When the TVC receives the activity webhook, it:
+
+1. verifies the webhook signature and fetches the activity from Turnkey;
+2. finds the initiating vote whose message hashes to the activity's
+   fingerprint, and checks that the message's `parameters` equal the activity's
+   intent;
+3. calls `parse_base64(envelopeXdr, network)` and
+   `verify_signing_hash(payload)`;
+4. checks that `signWith` is the transaction's source, applies its policy, and
+   votes.
+
+Step 3 binds the transaction the policy reviewed to the digest Turnkey signs.
 
 ## Development
 
