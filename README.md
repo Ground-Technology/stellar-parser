@@ -73,6 +73,14 @@ fn review(
 
 ## Example: Turnkey Verifiable Cloud policy
 
+For a runnable TVC container, see [`examples/tvc`](examples/tvc/README.md).
+It verifies signed Turnkey webhooks, fetches and checks the original signing
+request, and submits approval or rejection votes. Its policy allows calls only
+to one configured Soroban contract. Docker Compose includes a local mock Turnkey
+service and smoke tests; no credentials are needed.
+
+### Vault-deposit policy
+
 [`examples/tvc_policy.rs`](examples/tvc_policy.rs) is a signing policy for a
 Turnkey Verifiable Cloud (TVC) application. It approves one kind of transaction:
 an owner account depositing tokens into a specific vault contract. It approves
@@ -112,7 +120,7 @@ owner account, vault contract, token contract, and current Unix time. It prints
 ## Development
 
 ```sh
-cargo test --locked --all-targets
+cargo test --locked --workspace --all-targets
 ```
 
 CI also runs fmt, clippy, doc tests, and rustdoc, and checks the sample

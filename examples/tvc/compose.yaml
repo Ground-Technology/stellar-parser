@@ -1,0 +1,37 @@
+services:
+  tvc:
+    build:
+      context: ../..
+      dockerfile: examples/tvc/Dockerfile
+    environment:
+      TURNKEY_ORGANIZATION_ID: local-organization
+      TURNKEY_API_URL: http://mock-turnkey:44021
+      STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      ALLOWED_CONTRACT: CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U
+      TURNKEY_KEY_FILE: /keys/voter.hex
+    ports:
+      - "127.0.0.1:44020:44020"
+    volumes:
+      - voter-keys:/keys
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:44020/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      mock-turnkey:
+        condition: service_healthy
+
+  mock-turnkey:
+    build:
+      context: ../..
+      dockerfile: examples/tvc/Dockerfile
+    entrypoint: ["mock-turnkey"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:44021/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  voter-keys:
