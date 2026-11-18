@@ -20,33 +20,37 @@ Parsing rejects:
 - Base64 input longer than 174,764 bytes, including whitespace.
 
 The parser does not verify signatures or evaluate approval rules. The
-[`tvc_policy` example](examples/tvc_policy.rs) applies account, issuer,
-trustline-limit, fee, and expiry checks to a parsed transaction.
+[`tvc_policy` example](examples/tvc_policy.rs) restricts calls to one
+configured Soroban contract.
 
 ## TVC example
 
-[`examples/tvc_policy.rs`](examples/tvc_policy.rs) shows a policy for use in a
-Turnkey Verifiable Cloud application. It accepts one unsigned trustline operation
-for a caller-supplied account and issuer. It checks the requested signing hash,
-source, fee, trustline limit, and expiry.
+[`examples/tvc_policy.rs`](examples/tvc_policy.rs) evaluates whether a transaction
+calls only the configured Soroban contract. After verifying the requested signing
+hash, it returns `true` when the transaction has at least one operation and:
 
-The TVC application authenticates the webhook, retrieves the original signing
-request, and passes its envelope, signing digest, network, and policy configuration
-to the evaluator. The application then submits its vote.
-This example implements only policy evaluation.
+- Every operation is an `InvokeContract` call to the allowed contract.
+- Every authorization root and nested invocation calls that same contract.
+
+Function names and arguments are unrestricted. Other operations, host functions,
+contract targets, and contract-creation authorizations return `false`. Parse errors
+and signing-hash mismatches return an error.
+
+The TVC application authenticates the signing request and supplies its envelope,
+signing digest, and trusted network and allowed-contract configuration. It uses
+the evaluation result to submit its vote, treating errors as rejections.
+This example implements only policy evaluation. It checks declared calls;
+parsing cannot establish which other contracts may be called during execution.
 
 ```sh
 cargo run --locked --example tvc_policy -- \
-  tests/fixtures/trustline.xdr \
+  tests/fixtures/contract_call.xdr \
   'Test SDF Network ; September 2015' \
-  8246452a91b1d2133d1cbf1511bf21e70ccbdcb385586890de055134a7cab068 \
-  GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H \
-  GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA \
-  1999999500
+  d7e0577a8947703429c86f6b650d52faa4f14ac2d7d0ce4155fd4250ed7a7b03 \
+  CACQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQKBIFAUCQLC2U
 ```
 
-This command uses synthetic accounts and a fixed test time. It prints
-`example policy accepted`.
+This command uses a synthetic transaction and contract address. It prints `true`.
 
 Synthetic fixture inputs and their expected signing digest are documented in
 [`tests/fixtures/README.md`](tests/fixtures/README.md).
