@@ -2,11 +2,21 @@
 
 Decode a Stellar transaction and confirm it matches the digest you are about to sign.
 
-`stellar-parser` is a small Rust library for signing policies. It decodes a
-transaction envelope within fixed size and depth limits, computes its
-network-specific signing hash, and exposes every field (operations, Soroban
-contract calls, and complete authorization trees) so a policy can decide whether
-to approve the signature. It performs no I/O and holds no keys.
+`stellar-parser` is a small Rust library for signing policies. Given a
+transaction envelope (base64 or raw XDR) and a network passphrase, it:
+
+- decodes the envelope, rejecting anything that is not a single v1 transaction:
+  fee-bump and v0 envelopes, trailing bytes, inputs over 128 KiB, and nesting
+  deeper than 100 XDR types;
+- computes the transaction's signing hash for that network, which is also its
+  Stellar transaction hash, and checks it against the digest you were asked to
+  sign;
+- returns the full decoded transaction, plus each Soroban contract call with its
+  arguments and authorization trees.
+
+The parser does not decide whether a transaction is safe to sign. Your policy
+makes that decision from what the parser returns. The library makes no network
+calls and holds no keys.
 
 Built on [`stellar-xdr`](https://github.com/stellar/rs-stellar-xdr) 30.0.0
 (Stellar protocol 30).
@@ -61,87 +71,27 @@ fn review(
 `parse_xdr` takes raw bytes instead of base64. All XDR types are re-exported as
 `stellar_parser::xdr`.
 
-## What the parser guarantees
+## Example: Turnkey Verifiable Cloud policy
 
-- **Complete decoding.** The whole input must decode as one v1 transaction
-  envelope. Trailing bytes are rejected.
-- **Digest binding.** `signing_hash()` is computed from the network passphrase
-  and the decoded transaction, and equals the Stellar transaction hash. Existing
-  signatures are kept but excluded from the digest.
-- **Nothing hidden.** Source account, sequence, fee, preconditions, memo, every
-  operation and its source, Soroban resource data, and authorization trees are
-  returned as decoded. Amounts stay as raw integers; token decimals are not
-  inferred.
-- **Bounded work.** Inputs beyond the limits below are rejected.
-- **No I/O.** No network calls, keys, or credentials.
+[`examples/tvc_policy.rs`](examples/tvc_policy.rs) is a signing policy for a
+Turnkey Verifiable Cloud (TVC) application. It approves one kind of transaction:
+an owner account depositing tokens into a specific vault contract. It approves
+the signature only if:
 
-## What the caller must do
+- the requested digest matches the transaction;
+- the owner is the transaction's source;
+- the fee is at most 1 XLM, and the transaction expires within 10 minutes;
+- the only operation is a call to `deposit(owner, amount)` on the vault, for at
+  most 1,000 tokens;
+- the owner authorizes only that call and, inside it, the token's
+  `transfer(owner, vault, amount)`.
 
-- Authenticate the signing request before trusting its envelope or digest.
-- Pass the exact network passphrase. A wrong passphrase yields a different hash,
-  so `verify_signing_hash` fails.
-- Inspect `transaction().operations`, not only `contract_calls()`.
-  `contract_calls()` returns only `InvokeContract` host functions; other
-  operations, contract creation, and Wasm uploads appear only in the operation
-  list.
-- Check every node of each authorization tree. Signing a transaction as its
-  source authorizes every invocation in its source-account authorization trees.
-- Enforce its own rules: allowlists, amounts, fees, sequence, and time bounds.
-- Treat a successful parse as a description of the transaction, not of its
-  effects. The parser does not verify signatures or simulate execution.
+The tests change one field of a sample transaction at a time and check that the
+policy rejects it. A real TVC application would also authenticate the request
+and fetch it from Turnkey before calling `evaluate`; the example covers only the
+policy.
 
-`signing_hash()` is the transaction hash, which the transaction's source signs.
-An account that authorizes a contract call with address credentials instead,
-for example when a relayer submits the transaction, signs a different
-authorization-entry digest that this crate does not compute.
-
-## Limits and errors
-
-| Check | Limit | Error |
-| --- | --- | --- |
-| Envelope type | v1 only; v0 and fee-bump are rejected | `UnsupportedEnvelope` |
-| Decoded size | 128 KiB (`MAX_XDR_BYTES`) | `InputTooLarge` |
-| Base64 size | 174,764 bytes including whitespace (`MAX_BASE64_BYTES`) | `InputTooLarge` |
-| Decoder depth | 100 (`MAX_XDR_DEPTH`) | `InvalidXdr(DepthLimitExceeded)` |
-| Network passphrase | Must not be empty | `EmptyNetworkPassphrase` |
-| Requested digest | Must equal `signing_hash()` | `SigningHashMismatch` |
-
-Decoder depth counts nested XDR types, not visible nesting. A typical Soroban
-call uses about 20; a contract argument can nest about 21 vectors deep before
-reaching the limit.
-
-## Turnkey Verifiable Cloud example
-
-[`examples/tvc_policy.rs`](examples/tvc_policy.rs) is a policy for a Turnkey
-Verifiable Cloud (TVC) application. It approves one action: the owner
-depositing into a pinned vault contract, where the deposit may authorize only
-the matching transfer on a pinned token contract. Every rule below must pass.
-
-| Rule | Prevents |
-| --- | --- |
-| The requested digest equals the transaction's signing hash | Approving one transaction while signing another |
-| The transaction source, and any operation source, is the owner | Signing for another account the key controls |
-| Fee is at most 1 XLM, and the Soroban resource fee is within it | Draining the account through fees |
-| The transaction is valid now and expires within 10 minutes | Holding a signed transaction to submit later |
-| There is exactly one operation: `deposit` on the vault contract | Extra operations, other contracts, contract deployment |
-| Arguments are `deposit(owner, amount)` with `0 < amount ≤ 1,000` tokens | Depositing for someone else, or more than allowed |
-| One source-account authorization whose root is that exact call | Authorizing a call other than the one reviewed |
-| The deposit authorizes only `token.transfer(owner, vault, amount)`, with nothing nested below it | Hidden calls the signature would also authorize |
-
-The vault may call other contracts while it runs, but any call that requires
-the owner's authorization must match the authorization tree, which the policy
-checks completely. Allowances the owner granted earlier are not visible in the
-transaction.
-
-The example's tests change one field of the fixture per case and assert which
-rule rejects it, covering each row above. They also accept boundary cases: a
-deposit at the cap and an operation source equal to the owner.
-
-The TVC application authenticates the webhook, retrieves the original signing
-request, and passes its envelope and signing digest, with the trusted network
-and policy configuration, to `evaluate`. It votes to approve only when
-`evaluate` returns `Ok`. The example includes no webhook server, keys, or
-deployment configuration. Run it against the synthetic fixture:
+Run it against the sample transaction:
 
 ```sh
 cargo run --locked --example tvc_policy -- \
@@ -154,29 +104,20 @@ cargo run --locked --example tvc_policy -- \
   1999999500
 ```
 
-The arguments are the envelope file, network passphrase, requested digest,
+The arguments are the transaction file, network passphrase, digest to sign,
 owner account, vault contract, token contract, and current Unix time. It prints
-`approved`; a rejected transaction exits with the rule it broke. The fixture's
-synthetic accounts, contracts, and fixed timestamp are described in
+`approved`. The sample transaction is described in
 [`tests/fixtures/README.md`](tests/fixtures/README.md).
 
 ## Development
 
-Rust 1.94.0 is pinned in `rust-toolchain.toml`. CI runs:
-
 ```sh
-cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
-cargo test --locked --doc
-RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
-python3 tests/fixtures/contract_call.py | diff - <(cat tests/fixtures/contract_call.xdr tests/fixtures/contract_call.sha256)
 ```
 
-## Versioning
-
-`stellar-xdr` types are part of this crate's public API, so upgrading
-`stellar-xdr` is a breaking change and ships as a new minor version before 1.0.
+CI also runs fmt, clippy, doc tests, and rustdoc, and checks the sample
+transaction against an independent Python encoder
+(`tests/fixtures/contract_call.py`).
 
 ## Security
 
