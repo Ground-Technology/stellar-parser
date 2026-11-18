@@ -1,6 +1,6 @@
 FROM rust:1.94.0-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml README.md ./
 COPY src ./src
 COPY examples ./examples
 RUN cargo build --locked --release -p stellar-tvc-example --bins
